@@ -427,3 +427,95 @@ class SmartBetaETF:
         self.factor_scores['esg'] = esg_score
         
         print(f"Score ESG calculé pour {len(esg_score)} titres")
+        
+    def _calculate_combined_score(self, factors, weights=None):
+        """
+        Calcule le score combiné en utilisant une pondération des facteurs
+        
+        Parameters:
+        -----------
+        factors : list
+            Liste des facteurs à inclure
+        weights : dict
+            Dictionnaire avec les poids pour chaque facteur (somme = 1)
+        """
+        print("Calcul du score combiné...")
+        
+        # Vérifier si les poids sont fournis, sinon utiliser des poids égaux
+        if weights is None:
+            weights = {factor: 1/len(factors) for factor in factors}
+        
+        # Normaliser les poids pour qu'ils somment à 1
+        total_weight = sum(weights.values())
+        weights = {k: v/total_weight for k, v in weights.items()}
+        
+        # Créer un dataframe pour le score combiné
+        combined_score = pd.Series(0, index=self.universe)
+        
+        # Additionner les scores pondérés
+        for factor, weight in weights.items():
+            if factor in self.factor_scores:
+                combined_score += self.factor_scores[factor] * weight
+        
+        # Stocker le score combiné
+        self.factor_scores['combined'] = combined_score
+        
+        print(f"Score combiné calculé avec les poids suivants: {weights}")
+        
+        return combined_score
+    
+    def optimize_portfolio(self, n_stocks=50, max_weight=0.05, min_liquidity_percentile=0.2):
+        """
+        Optimise le portefeuille en sélectionnant les titres avec les meilleurs scores
+        
+        Parameters:
+        -----------
+        n_stocks : int
+            Nombre de titres à inclure dans le portefeuille
+        max_weight : float
+            Poids maximum pour un titre (contrainte de diversification)
+        min_liquidity_percentile : float
+            Percentile minimum de liquidité pour inclure un titre
+        """
+        print(f"Optimisation du portefeuille avec {n_stocks} titres...")
+        
+        # Vérifier que le score combiné est calculé
+        if 'combined' not in self.factor_scores:
+            raise ValueError("Le score combiné n'a pas été calculé. Exécutez d'abord calculate_factor_scores().")
+        
+        # Filtrer les titres avec une liquidité suffisante
+        if 'volumes' in self.data:
+            # Calculer la liquidité moyenne sur 30 jours
+            liquidity = self.data['volumes'].iloc[-30:].mean()
+            
+            # Déterminer le seuil de liquidité
+            liquidity_threshold = liquidity.quantile(min_liquidity_percentile)
+            
+            # Filtrer les titres avec une liquidité suffisante
+            liquid_tickers = liquidity[liquidity >= liquidity_threshold].index.tolist()
+            print(f"{len(liquid_tickers)} titres passent le filtre de liquidité")
+            
+            # Filtrer les scores combinés
+            filtered_scores = self.factor_scores['combined'][liquid_tickers]
+        else:
+            filtered_scores = self.factor_scores['combined']
+        
+        # Sélectionner les n_stocks titres avec les meilleurs scores
+        selected_tickers = filtered_scores.nlargest(n_stocks).index.tolist()
+        
+        # Calculer les poids initiaux basés sur les scores
+        initial_weights = filtered_scores[selected_tickers]
+        initial_weights = initial_weights / initial_weights.sum()
+        
+        # Appliquer la contrainte de poids maximum
+        capped_weights = np.minimum(initial_weights, max_weight)
+        
+        # Renormaliser les poids pour qu'ils somment à 1
+        etf_weights = capped_weights / capped_weights.sum()
+        
+        # Stocker les poids de l'ETF
+        self.etf_weights = etf_weights
+        
+        print(f"Portefeuille optimisé avec {len(etf_weights)} titres")
+        
+        return etf_weights
