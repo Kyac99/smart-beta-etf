@@ -519,3 +519,86 @@ class SmartBetaETF:
         print(f"Portefeuille optimisé avec {len(etf_weights)} titres")
         
         return etf_weights
+    
+    def backtest(self, rebalancing_frequency='quarterly'):
+        """
+        Effectue un backtesting de la stratégie
+        
+        Parameters:
+        -----------
+        rebalancing_frequency : str
+            Fréquence de rebalancement ('monthly', 'quarterly', 'semi-annually', 'annually')
+        """
+        print(f"Backtesting avec rebalancement {rebalancing_frequency}...")
+        
+        # Vérifier que les poids sont calculés
+        if self.etf_weights is None:
+            raise ValueError("Les poids du portefeuille n'ont pas été calculés. Exécutez d'abord optimize_portfolio().")
+        
+        # Définir la fenêtre de rebalancement en jours
+        rebalancing_days = {
+            'monthly': 21,
+            'quarterly': 63,
+            'semi-annually': 126,
+            'annually': 252
+        }
+        
+        window = rebalancing_days.get(rebalancing_frequency, 63)  # 63 jours par défaut (trimestriel)
+        
+        # Récupérer les prix
+        prices = self.data['prices']
+        
+        # Initialiser le dataframe pour la NAV de l'ETF
+        etf_nav = pd.Series(index=prices.index, dtype=float)
+        
+        # Valeur initiale
+        initial_value = 100
+        etf_nav.iloc[0] = initial_value
+        
+        # Calculer les rendements journaliers
+        daily_returns = prices.pct_change().fillna(0)
+        
+        # Initialiser les poids du portefeuille
+        current_weights = self.etf_weights.copy()
+        
+        # Simulation
+        for i in range(1, len(prices)):
+            # Calculer la NAV pour le jour i
+            if i == 1:
+                # Premier jour après l'initialisation
+                etf_nav.iloc[i] = initial_value * (1 + (daily_returns.iloc[i][current_weights.index] * current_weights).sum())
+            else:
+                # Appliquer les rendements du jour
+                etf_nav.iloc[i] = etf_nav.iloc[i-1] * (1 + (daily_returns.iloc[i][current_weights.index] * current_weights).sum())
+            
+            # Rebalancement du portefeuille selon la fréquence définie
+            if i % window == 0:
+                # Dans un cas réel, nous recalculerions les scores et les poids ici
+                # Pour cette simulation, nous gardons les poids initiaux
+                
+                # Nous pourrions modéliser les coûts de rebalancement si nécessaire
+                rebalance_cost = 0.001  # 0.1% de coûts de transaction
+                etf_nav.iloc[i] = etf_nav.iloc[i] * (1 - rebalance_cost)
+        
+        # Stocker la NAV de l'ETF
+        self.etf_nav = etf_nav
+        
+        # Calculer la NAV du benchmark pour la même période
+        benchmark_prices = self.data['benchmark']
+        benchmark_returns = benchmark_prices.pct_change().fillna(0)
+        
+        benchmark_nav = pd.Series(index=benchmark_prices.index, dtype=float)
+        benchmark_nav.iloc[0] = initial_value
+        
+        for i in range(1, len(benchmark_prices)):
+            benchmark_nav.iloc[i] = benchmark_nav.iloc[i-1] * (1 + benchmark_returns.iloc[i])
+        
+        # Stocker la NAV du benchmark
+        self.benchmark_nav = benchmark_nav
+        
+        print(f"Backtesting terminé sur {len(etf_nav)} jours")
+        
+        # Calculer les métriques de performance
+        self.calculate_performance_metrics()
+        
+        return etf_nav, benchmark_nav
