@@ -386,3 +386,44 @@ class SmartBetaETF:
         self.factor_scores['low_volatility'] = low_vol_score
         
         print(f"Score Low Volatility calculé pour {len(low_vol_score)} titres")
+        
+    def _calculate_esg_factor(self):
+        """Calcule le score ESG basé sur les métriques environnementales, sociales et de gouvernance"""
+        print("Calcul du facteur ESG...")
+        
+        # Initialiser le dataframe pour les scores ESG
+        esg_scores = pd.DataFrame(index=self.universe)
+        
+        # Récupérer les métriques ESG à partir des données fondamentales
+        if 'fundamentals' in self.data and not self.data['fundamentals'].empty:
+            fund_data = self.data['fundamentals']
+            
+            # ESG Score - plus élevé = meilleur (selon la méthodologie utilisée)
+            if 'ESG Score' in fund_data.columns:
+                esg_scores['ESG Score'] = fund_data['ESG Score']
+        
+        # Si les données ESG ne sont pas disponibles, utiliser un score aléatoire (pour démonstration)
+        if esg_scores.empty or esg_scores.isna().all().all():
+            # Avertissement: Ce bloc est uniquement pour la démonstration
+            np.random.seed(42)  # Pour la reproductibilité
+            esg_scores['ESG Score'] = pd.Series(
+                np.random.uniform(0, 100, size=len(self.universe)),
+                index=self.universe
+            )
+            print("Avertissement: Données ESG non disponibles, utilisation de valeurs aléatoires pour la démonstration")
+        
+        # Normaliser les scores
+        scaler = StandardScaler()
+        normalized_scores = pd.DataFrame(
+            scaler.fit_transform(esg_scores.fillna(esg_scores.mean())),
+            index=esg_scores.index,
+            columns=esg_scores.columns
+        )
+        
+        # Calculer le score moyen ESG
+        esg_score = normalized_scores.mean(axis=1)
+        
+        # Stocker le score
+        self.factor_scores['esg'] = esg_score
+        
+        print(f"Score ESG calculé pour {len(esg_score)} titres")
