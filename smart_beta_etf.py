@@ -348,3 +348,41 @@ class SmartBetaETF:
         self.factor_scores['quality'] = quality_score
         
         print(f"Score Quality calculé pour {len(quality_score)} titres")
+        
+    def _calculate_low_volatility_factor(self):
+        """Calcule le score Low Volatility basé sur la volatilité historique"""
+        print("Calcul du facteur Low Volatility...")
+        
+        # Calcul des rendements
+        returns = self.data['prices'].pct_change().dropna()
+        
+        # Créer le dataframe pour stocker les scores de volatilité
+        volatility_scores = pd.DataFrame(index=self.universe)
+        
+        # Volatilité sur 1 an (252 jours)
+        vol_1y = returns.iloc[-252:].std() * np.sqrt(252)
+        volatility_scores['1y'] = 1 / vol_1y  # Inverser pour que les moins volatiles aient un score plus élevé
+        
+        # Volatilité sur 6 mois (126 jours)
+        vol_6m = returns.iloc[-126:].std() * np.sqrt(252)
+        volatility_scores['6m'] = 1 / vol_6m
+        
+        # Volatilité sur 3 mois (63 jours)
+        vol_3m = returns.iloc[-63:].std() * np.sqrt(252)
+        volatility_scores['3m'] = 1 / vol_3m
+        
+        # Normaliser les scores
+        scaler = StandardScaler()
+        normalized_scores = pd.DataFrame(
+            scaler.fit_transform(volatility_scores.fillna(volatility_scores.mean())),
+            index=volatility_scores.index,
+            columns=volatility_scores.columns
+        )
+        
+        # Calculer le score moyen Low Volatility
+        low_vol_score = normalized_scores.mean(axis=1)
+        
+        # Stocker le score
+        self.factor_scores['low_volatility'] = low_vol_score
+        
+        print(f"Score Low Volatility calculé pour {len(low_vol_score)} titres")
