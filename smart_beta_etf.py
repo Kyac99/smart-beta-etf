@@ -53,6 +53,8 @@ class SmartBetaETF:
         self.etf_nav = None
         self.benchmark_nav = None
         self.performance_metrics = None
+        self.drawdowns = None
+        self.sector_allocation = None
         
         print(f"ETF Smart Beta initialisé avec {len(self.universe)} titres potentiels")
     
@@ -107,6 +109,9 @@ class SmartBetaETF:
             # Récupération des données fondamentales (pour les facteurs Value et Quality)
             self.data['fundamentals'] = self._fetch_fundamentals()
             
+            # Récupération des données de secteur pour l'allocation sectorielle
+            self.data['sectors'] = self._fetch_sectors()
+            
             print(f"Données récupérées avec succès pour {self.data['prices'].shape[1]} titres sur {len(self.universe)}")
             
         except Exception as e:
@@ -152,6 +157,19 @@ class SmartBetaETF:
                 continue
         
         return pd.DataFrame(fundamentals).T
+    
+    def _fetch_sectors(self):
+        """Récupère les données de secteur pour chaque titre"""
+        sectors = {}
+        
+        for ticker in self.universe:
+            try:
+                stock = yf.Ticker(ticker)
+                sectors[ticker] = stock.info.get('sector', 'Unknown')
+            except:
+                sectors[ticker] = 'Unknown'
+        
+        return pd.Series(sectors)
     
     def _clean_data(self):
         """Nettoie les données et supprime les titres avec trop de valeurs manquantes"""
@@ -516,9 +534,31 @@ class SmartBetaETF:
         # Stocker les poids de l'ETF
         self.etf_weights = etf_weights
         
+        # Calculer l'allocation sectorielle
+        if 'sectors' in self.data:
+            self._calculate_sector_allocation()
+        
         print(f"Portefeuille optimisé avec {len(etf_weights)} titres")
         
         return etf_weights
+    
+    def _calculate_sector_allocation(self):
+        """Calcule l'allocation sectorielle du portefeuille"""
+        if self.etf_weights is None or 'sectors' not in self.data:
+            return
+        
+        # Récupérer les secteurs des titres du portefeuille
+        portfolio_sectors = self.data['sectors'][self.etf_weights.index]
+        
+        # Calculer l'allocation par secteur
+        sector_allocation = pd.Series(0.0, index=portfolio_sectors.unique())
+        
+        for ticker in self.etf_weights.index:
+            sector = self.data['sectors'][ticker]
+            sector_allocation[sector] += self.etf_weights[ticker]
+        
+        # Stocker l'allocation sectorielle
+        self.sector_allocation = sector_allocation.sort_values(ascending=False)
     
     def backtest(self, rebalancing_frequency='quarterly'):
         """
@@ -596,9 +636,469 @@ class SmartBetaETF:
         # Stocker la NAV du benchmark
         self.benchmark_nav = benchmark_nav
         
+        # Calculer les drawdowns
+        self._calculate_drawdowns()
+        
         print(f"Backtesting terminé sur {len(etf_nav)} jours")
         
         # Calculer les métriques de performance
         self.calculate_performance_metrics()
         
         return etf_nav, benchmark_nav
+    
+    def _calculate_drawdowns(self):
+        """Calcule les drawdowns pour l'ETF et le benchmark"""
+        # Drawdowns de l'ETF
+        if self.etf_nav is None:
+            return
+            
+        # Calcul des drawdowns de l'ETF
+        etf_peak = self.etf_nav.cummax()
+        etf_drawdowns = (self.etf_nav - etf_peak) / etf_peak
+        
+        # Calcul des drawdowns du benchmark
+        benchmark_peak = self.benchmark_nav.cummax()
+        benchmark_drawdowns = (self.benchmark_nav - benchmark_peak) / benchmark_peak
+        
+        # Stockage des drawdowns
+        self.drawdowns = pd.DataFrame({
+            'ETF': etf_drawdowns,
+            'Benchmark': benchmark_drawdowns
+        })
+    
+    def calculate_performance_metrics(self):
+        """Calcule les métriques de performance de l'ETF et du benchmark"""
+        if self.etf_nav is None or self.benchmark_nav is None:
+            print("Aucune donnée de NAV disponible. Exécutez d'abord backtest().")
+            return
+        
+        # Calcul des rendements journaliers
+        etf_returns = self.etf_nav.pct_change().dropna()
+        benchmark_returns = self.benchmark_nav.pct_change().dropna()
+        
+        # Rendements annualisés
+        etf_annual_return = ((self.etf_nav.iloc[-1] / self.etf_nav.iloc[0]) ** (252 / len(self.etf_nav))) - 1
+        benchmark_annual_return = ((self.benchmark_nav.iloc[-1] / self.benchmark_nav.iloc[0]) ** (252 / len(self.benchmark_nav))) - 1
+        
+        # Volatilité annualisée
+        etf_volatility = etf_returns.std() * np.sqrt(252)
+        benchmark_volatility = benchmark_returns.std() * np.sqrt(252)
+        
+        # Ratio de Sharpe (avec taux sans risque = 0 pour simplifier)
+        etf_sharpe = etf_annual_return / etf_volatility
+        benchmark_sharpe = benchmark_annual_return / benchmark_volatility
+        
+        # Alpha et Beta (régression sur les rendements du benchmark)
+        X = benchmark_returns.values.reshape(-1, 1)
+        y = etf_returns.values
+        beta, alpha = np.polyfit(X.flatten(), y, 1)
+        alpha = alpha * 252  # Annualisé
+        
+        # Tracking Error
+        tracking_diff = etf_returns - benchmark_returns
+        tracking_error = tracking_diff.std() * np.sqrt(252)
+        
+        # Maximum Drawdown
+        etf_max_drawdown = self.drawdowns['ETF'].min()
+        benchmark_max_drawdown = self.drawdowns['Benchmark'].min()
+        
+        # Nombre de mois positifs / négatifs
+        monthly_returns = self.etf_nav.resample('M').last().pct_change().dropna()
+        positive_months = (monthly_returns > 0).sum()
+        negative_months = (monthly_returns <= 0).sum()
+        
+        # Ratio d'information
+        information_ratio = (etf_annual_return - benchmark_annual_return) / tracking_error
+        
+        # Stocker les métriques de performance
+        self.performance_metrics = {
+            'ETF Annual Return': etf_annual_return,
+            'Benchmark Annual Return': benchmark_annual_return,
+            'ETF Volatility': etf_volatility,
+            'Benchmark Volatility': benchmark_volatility,
+            'ETF Sharpe Ratio': etf_sharpe,
+            'Benchmark Sharpe Ratio': benchmark_sharpe,
+            'Alpha': alpha,
+            'Beta': beta,
+            'Tracking Error': tracking_error,
+            'Information Ratio': information_ratio,
+            'ETF Max Drawdown': etf_max_drawdown,
+            'Benchmark Max Drawdown': benchmark_max_drawdown,
+            'Positive Months': positive_months,
+            'Negative Months': negative_months,
+            'Positive/Negative Ratio': positive_months / negative_months if negative_months > 0 else float('inf')
+        }
+        
+        return self.performance_metrics
+    
+    def plot_performance(self, save_path=None):
+        """
+        Affiche un graphique de performance comparant l'ETF Smart Beta et le benchmark
+        
+        Parameters:
+        -----------
+        save_path : str
+            Chemin où enregistrer le graphique (optionnel)
+        """
+        if self.etf_nav is None or self.benchmark_nav is None:
+            print("Aucune donnée de NAV disponible. Exécutez d'abord backtest().")
+            return
+        
+        plt.figure(figsize=(12, 6))
+        
+        # Normaliser les séries pour qu'elles commencent à 100
+        etf_normalized = self.etf_nav / self.etf_nav.iloc[0] * 100
+        benchmark_normalized = self.benchmark_nav / self.benchmark_nav.iloc[0] * 100
+        
+        # Tracer les performances
+        plt.plot(etf_normalized.index, etf_normalized, 'b-', linewidth=2, label=f'ETF Smart Beta (↑{self.performance_metrics["ETF Annual Return"]:.2%}/an)')
+        plt.plot(benchmark_normalized.index, benchmark_normalized, 'g--', linewidth=2, label=f'{self.benchmark_ticker} (↑{self.performance_metrics["Benchmark Annual Return"]:.2%}/an)')
+        
+        # Ajouter titre et légendes
+        plt.title(f'Performance de l\'ETF Smart Beta vs {self.benchmark_ticker}', fontsize=14)
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Valeur (base 100)', fontsize=12)
+        plt.legend(fontsize=12)
+        plt.grid(True, alpha=0.3)
+        
+        # Formatter l'axe Y
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: f"{int(x)}" if x % 1 == 0 else f"{x:.1f}"))
+        
+        # Ajouter des informations de performance
+        plt.figtext(0.15, 0.15, 
+                  f'Alpha: {self.performance_metrics["Alpha"]:.2%}\n'
+                  f'Beta: {self.performance_metrics["Beta"]:.2f}\n'
+                  f'Sharpe Ratio: {self.performance_metrics["ETF Sharpe Ratio"]:.2f}',
+                  bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+        
+        plt.tight_layout()
+        
+        # Sauvegarder si un chemin est spécifié
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Graphique de performance enregistré: {save_path}")
+        
+        plt.show()
+
+    def plot_drawdowns(self, save_path=None):
+        """
+        Affiche un graphique des drawdowns
+        
+        Parameters:
+        -----------
+        save_path : str
+            Chemin où enregistrer le graphique (optionnel)
+        """
+        if self.drawdowns is None:
+            print("Aucune donnée de drawdowns disponible. Exécutez d'abord backtest().")
+            return
+        
+        plt.figure(figsize=(12, 6))
+        
+        # Tracer les drawdowns
+        plt.plot(self.drawdowns.index, self.drawdowns['ETF'] * 100, 'b-', linewidth=2, label='ETF Smart Beta')
+        plt.plot(self.drawdowns.index, self.drawdowns['Benchmark'] * 100, 'g--', linewidth=2, label=self.benchmark_ticker)
+        
+        # Ajouter titre et légendes
+        plt.title(f'Drawdowns de l\'ETF Smart Beta vs {self.benchmark_ticker}', fontsize=14)
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Drawdown (%)', fontsize=12)
+        plt.legend(fontsize=12)
+        plt.grid(True, alpha=0.3)
+        
+        # Inverser l'axe Y pour que les drawdowns soient vers le bas
+        plt.gca().invert_yaxis()
+        
+        # Ajouter une ligne horizontale à zéro
+        plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+        
+        # Ajouter des informations de performance
+        plt.figtext(0.15, 0.15, 
+                  f'Max Drawdown ETF: {self.performance_metrics["ETF Max Drawdown"]*100:.2f}%\n'
+                  f'Max Drawdown {self.benchmark_ticker}: {self.performance_metrics["Benchmark Max Drawdown"]*100:.2f}%',
+                  bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+        
+        plt.tight_layout()
+        
+        # Sauvegarder si un chemin est spécifié
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Graphique des drawdowns enregistré: {save_path}")
+        
+        plt.show()
+    
+    def plot_factor_exposures(self, save_path=None):
+        """
+        Affiche un graphique radar des expositions factorielles
+        
+        Parameters:
+        -----------
+        save_path : str
+            Chemin où enregistrer le graphique (optionnel)
+        """
+        if self.etf_weights is None or not self.factor_scores:
+            print("Aucune donnée de portefeuille ou de facteurs disponible.")
+            return
+        
+        # Calculer les expositions factorielles du portefeuille
+        exposures = {}
+        factors = [f for f in self.factor_scores.keys() if f != 'combined']
+        
+        for factor in factors:
+            if factor in self.factor_scores:
+                # Exposition = score moyen pondéré des titres du portefeuille
+                exposures[factor] = (self.factor_scores[factor][self.etf_weights.index] * self.etf_weights).sum()
+        
+        # Normaliser les expositions sur une échelle de 0 à 1
+        max_exposure = max(exposures.values())
+        min_exposure = min(exposures.values())
+        range_exposure = max_exposure - min_exposure
+        
+        normalized_exposures = {k: (v - min_exposure) / range_exposure if range_exposure > 0 else 0.5 for k, v in exposures.items()}
+        
+        # Créer le graphique radar
+        categories = list(normalized_exposures.keys())
+        values = list(normalized_exposures.values())
+        
+        # Répéter le premier élément pour fermer le graphique radar
+        categories = categories + [categories[0]]
+        values = values + [values[0]]
+        
+        # Convertir en radians pour le tracé
+        angles = np.linspace(0, 2*np.pi, len(categories), endpoint=False).tolist()
+        angles += angles[:1]  # Fermer le graphique radar
+        
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+        
+        # Tracer les expositions factorielles
+        ax.plot(angles, values, 'o-', linewidth=2, label='ETF Smart Beta')
+        ax.fill(angles, values, alpha=0.25)
+        
+        # Ajouter les labels des facteurs
+        ax.set_xticks(angles[:-1])
+        ax.set_xticklabels(categories[:-1], fontsize=12)
+        
+        # Ajouter des cercles de référence
+        ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+        ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=10)
+        ax.set_rlabel_position(0)
+        
+        # Ajouter titre
+        plt.title('Expositions Factorielles de l\'ETF Smart Beta', fontsize=14, y=1.1)
+        
+        plt.tight_layout()
+        
+        # Sauvegarder si un chemin est spécifié
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Graphique des expositions factorielles enregistré: {save_path}")
+        
+        plt.show()
+    
+    def plot_sector_allocation(self, save_path=None):
+        """
+        Affiche un graphique de l'allocation sectorielle
+        
+        Parameters:
+        -----------
+        save_path : str
+            Chemin où enregistrer le graphique (optionnel)
+        """
+        if self.sector_allocation is None:
+            print("Aucune donnée d'allocation sectorielle disponible.")
+            return
+        
+        plt.figure(figsize=(12, 8))
+        
+        # Créer le graphique en barres horizontales
+        sector_allocation_pct = self.sector_allocation * 100
+        sector_allocation_pct = sector_allocation_pct.sort_values(ascending=True)
+        
+        bars = plt.barh(sector_allocation_pct.index, sector_allocation_pct, color=sns.color_palette("viridis", len(sector_allocation_pct)))
+        
+        # Ajouter des étiquettes avec les pourcentages
+        for i, bar in enumerate(bars):
+            width = bar.get_width()
+            plt.text(width + 0.5, bar.get_y() + bar.get_height()/2, f'{width:.1f}%', 
+                    ha='left', va='center', fontsize=10)
+        
+        # Ajouter titre et légendes
+        plt.title('Allocation Sectorielle de l\'ETF Smart Beta', fontsize=14)
+        plt.xlabel('Allocation (%)', fontsize=12)
+        plt.ylabel('Secteur', fontsize=12)
+        plt.grid(True, alpha=0.3, axis='x')
+        
+        plt.tight_layout()
+        
+        # Sauvegarder si un chemin est spécifié
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Graphique de l'allocation sectorielle enregistré: {save_path}")
+        
+        plt.show()
+    
+    def export_portfolio(self, file_path):
+        """
+        Exporte la composition du portefeuille vers un fichier CSV
+        
+        Parameters:
+        -----------
+        file_path : str
+            Chemin où enregistrer le fichier CSV
+        """
+        if self.etf_weights is None:
+            print("Aucune donnée de portefeuille disponible. Exécutez d'abord optimize_portfolio().")
+            return
+        
+        # Créer un DataFrame avec les poids du portefeuille
+        portfolio_df = pd.DataFrame({'Weight': self.etf_weights})
+        
+        # Ajouter les scores factoriels
+        for factor, scores in self.factor_scores.items():
+            portfolio_df[f'{factor.capitalize()} Score'] = scores[portfolio_df.index]
+        
+        # Ajouter le secteur si disponible
+        if 'sectors' in self.data:
+            portfolio_df['Sector'] = self.data['sectors'][portfolio_df.index]
+        
+        # Ajouter les prix actuels si disponibles
+        if 'prices' in self.data:
+            portfolio_df['Last Price'] = self.data['prices'].iloc[-1][portfolio_df.index]
+        
+        # Trier par poids décroissant
+        portfolio_df = portfolio_df.sort_values(by='Weight', ascending=False)
+        
+        # Convertir les poids en pourcentage
+        portfolio_df['Weight'] = portfolio_df['Weight'] * 100
+        
+        # Enregistrer en CSV
+        portfolio_df.to_csv(file_path)
+        print(f"Composition du portefeuille exportée: {file_path}")
+    
+    def export_performance_report(self, file_path):
+        """
+        Exporte un rapport de performance complet vers un fichier Excel
+        
+        Parameters:
+        -----------
+        file_path : str
+            Chemin où enregistrer le fichier Excel
+        """
+        if self.performance_metrics is None:
+            print("Aucune métrique de performance disponible. Exécutez d'abord backtest().")
+            return
+        
+        # Créer un writer Excel
+        with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+            # Feuille 1: Métriques de performance
+            metrics_df = pd.DataFrame({
+                'Métrique': list(self.performance_metrics.keys()),
+                'Valeur': list(self.performance_metrics.values())
+            })
+            metrics_df.to_excel(writer, sheet_name='Performance', index=False)
+            
+            # Feuille 2: Composition du portefeuille
+            if self.etf_weights is not None:
+                portfolio_df = pd.DataFrame({'Poids (%)': self.etf_weights * 100})
+                if 'sectors' in self.data:
+                    portfolio_df['Secteur'] = self.data['sectors'][portfolio_df.index]
+                portfolio_df = portfolio_df.sort_values(by='Poids (%)', ascending=False)
+                portfolio_df.to_excel(writer, sheet_name='Portefeuille')
+            
+            # Feuille 3: NAV historique
+            if self.etf_nav is not None and self.benchmark_nav is not None:
+                nav_df = pd.DataFrame({
+                    'ETF Smart Beta': self.etf_nav,
+                    f'{self.benchmark_ticker}': self.benchmark_nav
+                })
+                nav_df.to_excel(writer, sheet_name='NAV Historique')
+            
+            # Feuille 4: Drawdowns
+            if self.drawdowns is not None:
+                self.drawdowns.to_excel(writer, sheet_name='Drawdowns')
+            
+            # Feuille 5: Allocation sectorielle
+            if self.sector_allocation is not None:
+                sector_df = pd.DataFrame({'Allocation (%)': self.sector_allocation * 100})
+                sector_df = sector_df.sort_values(by='Allocation (%)', ascending=False)
+                sector_df.to_excel(writer, sheet_name='Allocation Sectorielle')
+        
+        print(f"Rapport de performance exporté: {file_path}")
+    
+    def run_full_analysis(self, sample_size=100, n_stocks=30, max_weight=0.05, 
+                         rebalancing_frequency='quarterly', factors=None, output_dir='output'):
+        """
+        Exécute l'analyse complète en une seule méthode
+        
+        Parameters:
+        -----------
+        sample_size : int
+            Taille de l'échantillon pour l'univers d'investissement
+        n_stocks : int
+            Nombre de titres à inclure dans le portefeuille
+        max_weight : float
+            Poids maximum pour un titre
+        rebalancing_frequency : str
+            Fréquence de rebalancement ('monthly', 'quarterly', 'semi-annually', 'annually')
+        factors : list
+            Liste des facteurs à inclure (par défaut: tous)
+        output_dir : str
+            Répertoire de sortie pour les résultats
+        """
+        # Créer le répertoire de sortie s'il n'existe pas
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Répertoire de sortie créé: {output_dir}")
+        
+        # Étape 1: Récupération des données
+        print("\n=== Étape 1: Récupération des données ===")
+        self.fetch_data(sample_size=sample_size)
+        
+        # Étape 2: Calcul des scores factoriels
+        print("\n=== Étape 2: Calcul des scores factoriels ===")
+        self.calculate_factor_scores(factors=factors)
+        
+        # Étape 3: Optimisation du portefeuille
+        print("\n=== Étape 3: Optimisation du portefeuille ===")
+        self.optimize_portfolio(n_stocks=n_stocks, max_weight=max_weight)
+        
+        # Étape 4: Backtesting
+        print("\n=== Étape 4: Backtesting ===")
+        self.backtest(rebalancing_frequency=rebalancing_frequency)
+        
+        # Étape 5: Visualisation des résultats
+        print("\n=== Étape 5: Visualisation des résultats ===")
+        
+        # Graphique de performance
+        self.plot_performance(save_path=os.path.join(output_dir, 'performance.png'))
+        
+        # Graphique des drawdowns
+        self.plot_drawdowns(save_path=os.path.join(output_dir, 'drawdowns.png'))
+        
+        # Graphique des expositions factorielles
+        self.plot_factor_exposures(save_path=os.path.join(output_dir, 'factor_exposures.png'))
+        
+        # Graphique de l'allocation sectorielle
+        self.plot_sector_allocation(save_path=os.path.join(output_dir, 'sector_allocation.png'))
+        
+        # Étape 6: Exportation des résultats
+        print("\n=== Étape 6: Exportation des résultats ===")
+        
+        # Exporter la composition du portefeuille
+        self.export_portfolio(file_path=os.path.join(output_dir, 'portfolio.csv'))
+        
+        # Exporter le rapport de performance
+        self.export_performance_report(file_path=os.path.join(output_dir, 'performance_report.xlsx'))
+        
+        print("\n=== Analyse complète terminée ===")
+        print(f"Les résultats sont disponibles dans le répertoire: {output_dir}")
+        
+        # Afficher un résumé des performances
+        if self.performance_metrics:
+            print("\nRésumé des performances:")
+            print(f"Rendement annualisé de l'ETF: {self.performance_metrics['ETF Annual Return']:.2%}")
+            print(f"Rendement annualisé du benchmark: {self.performance_metrics['Benchmark Annual Return']:.2%}")
+            print(f"Ratio de Sharpe de l'ETF: {self.performance_metrics['ETF Sharpe Ratio']:.2f}")
+            print(f"Alpha: {self.performance_metrics['Alpha']:.2%}")
+            print(f"Beta: {self.performance_metrics['Beta']:.2f}")
+            print(f"Maximum Drawdown de l'ETF: {self.performance_metrics['ETF Max Drawdown']:.2%}")
